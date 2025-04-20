@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.Python
+env/
+build/
+dist/
+*.egg-info/
+.env
+toolify_env/
+venv/
+.idea/
+.vscode/
+output/
+toolify_data/
+*.log
+chromedriver*
+*.xlsx
+*.xls
