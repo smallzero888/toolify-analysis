@@ -341,7 +341,21 @@ def find_latest_files(directory: str, pattern: str = "Toolify_AI_Revenue_*.xlsx"
         return {}
 
     # 获取所有匹配的文件
-    files = glob.glob(os.path.join(directory, pattern))
+    # 在多个可能的位置查找文件
+    search_dirs = [
+        directory,  # 原始目录
+        os.path.join(directory, "toolify_data"),  # toolify_data子目录
+        os.path.join("output", "toolify_data")  # 标准目录
+    ]
+
+    files = []
+    for search_dir in search_dirs:
+        if os.path.exists(search_dir) and os.path.isdir(search_dir):
+            logger.info(f"在 {search_dir} 中查找文件...")
+            found_files = glob.glob(os.path.join(search_dir, pattern))
+            if found_files:
+                files.extend(found_files)
+                logger.info(f"在 {search_dir} 中找到 {len(found_files)} 个文件")
 
     if not files:
         logger.warning(f"在{directory}中未找到匹配{pattern}的文件")

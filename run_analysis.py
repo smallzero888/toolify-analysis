@@ -36,9 +36,11 @@ from datetime import datetime
 try:
     import pandas as pd
     import numpy as np
+    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 except ImportError as e:
     print(f"错误: 缺少必要的模块: {e}")
-    print("请先运行: pip install pandas numpy")
+    print("请先运行: pip install pandas numpy openpyxl")
     sys.exit(1)
 
 # 导入工具模块
@@ -84,20 +86,23 @@ def run_scraping(output_dir="output/toolify_data", languages=None):
 
             # 设置输出目录
             date_str = datetime.now().strftime("%Y%m%d")
-            output_dir_with_date = os.path.join(output_dir, f"toolify_analysis_{date_str}")
-            os.makedirs(output_dir_with_date, exist_ok=True)
+            # 直接使用output_dir，不创建子目录
+            os.makedirs(output_dir, exist_ok=True)
 
             # 为不同语言设置不同的URL
             if lang.lower() == "cn":
                 url = "https://www.toolify.ai/zh/Best-AI-Tools-revenue"
+                # 将cn转换为zh，以与toolify_scraper.py保持一致
+                scraper_lang = "zh"
             else:  # en
                 url = "https://www.toolify.ai/Best-AI-Tools-revenue"
+                scraper_lang = "en"
 
             # 设置输出文件名
-            output_file = os.path.join(output_dir_with_date, f"Toolify_AI_Revenue_{lang.upper()}_{date_str}.xlsx")
+            output_file = os.path.join(output_dir, f"Toolify_AI_Revenue_{lang.upper()}_{date_str}.xlsx")
 
             # 爬取数据
-            data = scrape_toolify_ranking(url, output_file, language=lang if lang == "cn" else "en")
+            data = scrape_toolify_ranking(url, output_file, language=scraper_lang)
 
             if data:
                 rows_count = len(data)
@@ -382,7 +387,248 @@ def run_product_analyzer(data_files, output_dir="output/toolify_analysis", batch
     return success
 
 
-# 新增: 分析指定排名范围的产品函数
+# 新增: 分析指定产品ID的函数
+def analyze_specific_products(product_ids, language="cn", date_str=None, api="deepseek", use_gpu=False, update_excel=False, retry_count=3, excel_file=None):
+    """
+    分析指定产品ID的产品
+
+    Args:
+        product_ids (str): 产品ID列表，如"1,2,3"
+        language (str): 语言，"cn"或"en"
+        date_str (str, optional): 日期字符串
+        api (str): 使用的API，"deepseek"或"openai"
+        use_gpu (bool): 是否使用GPU
+        update_excel (bool): 是否将分析结果插入到Excel表格中
+        retry_count (int): API调用失败时的重试次数
+        excel_file (str, optional): Excel文件路径，如果不提供则自动查找
+
+    Returns:
+        bool: 是否成功
+    """
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y%m%d")
+
+    # 解析产品ID列表
+    try:
+        ids = [int(id.strip()) for id in product_ids.split(",") if id.strip()]
+        if not ids:
+            print("错误: 未提供有效的产品ID")
+            return False
+    except ValueError:
+        print("错误: 产品ID必须是数字，以逗号分隔")
+        return False
+
+    # 确定输入文件
+    # 如果指定了excel_file参数，使用指定的文件
+    if 'excel_file' in globals() and excel_file and os.path.exists(excel_file):
+        input_file = excel_file
+    else:
+        # 尝试在不同的目录中查找文件
+        possible_paths = [
+            # 标准路径
+            os.path.join("output", "toolify_data", f"Toolify_AI_Revenue_{language.upper()}_{date_str}.xlsx"),
+            # 备用路径
+            os.path.join("output", f"toolify_data", f"Toolify_AI_Revenue_{language.upper()}_{date_str}.xlsx"),
+            # 兼容旧路径
+            os.path.join("output", "toolify_data", f"toolify_analysis_{date_str}", f"Toolify_AI_Revenue_{language.upper()}_{date_str}.xlsx")
+        ]
+
+        input_file = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                input_file = path
+                break
+
+        if not input_file:
+            print(f"错误: 找不到输入文件")
+            print("尝试了以下路径:")
+            for path in possible_paths:
+                print(f"  - {path}")
+            print("请确保已经爬取了榜单数据或使用--excel-file参数指定文件路径")
+            return False
+
+    # 读取Excel文件
+    try:
+        df = pd.read_excel(input_file)
+        products = df.to_dict('records')
+        print(f"已加载 {len(products)} 条产品数据")
+    except Exception as e:
+        print(f"错误: 无法读取Excel文件: {str(e)}")
+        return False
+
+    # 查找对应ID的产品
+    products_to_analyze = []
+    for id in ids:
+        # 查找对应ID的产品（ID对应Excel中的索引+1）
+        if 0 < id <= len(products):
+            products_to_analyze.append(products[id-1])
+        else:
+            print(f"警告: 找不到ID为 {id} 的产品，有效ID范围: 1-{len(products)}")
+
+    if not products_to_analyze:
+        print("错误: 没有找到任何有效的产品ID")
+        return False
+
+    # 设置输出目录
+    output_dir = os.path.join("output", f"toolify_analysis_{date_str}", language, "markdown_files")
+
+    # 构建命令
+    cmd = [
+        "python", "analyze_product.py"
+    ]
+
+    # 添加API参数
+    if api.lower() == "openai":
+        cmd.extend(["--api", "openai"])
+
+    # 添加语言参数
+    cmd.extend(["--language", language])
+
+    # 添加日期参数
+    cmd.extend(["--date", date_str])
+
+    # 显示即将执行的操作
+    lang_display = "中文" if language == "cn" else "英文"
+    print(f"正在分析{lang_display}榜单中ID为 {', '.join(map(str, ids))} 的产品...")
+
+    # 逐个分析产品
+    success = True
+    for product in products_to_analyze:
+        # 获取产品排名
+        rank = product.get("Rank") or product.get("排名")
+        if not rank:
+            # 如果没有排名，使用索引位置+1作为排名
+            rank = products.index(product) + 1
+
+        # 构建分析单个产品的命令
+        product_cmd = cmd.copy()
+        product_cmd.extend(["--rank", str(rank)])
+
+        # 执行命令
+        attempt = 0
+        product_success = False
+        max_attempts = max(1, retry_count + 1)  # 至少尝试一次
+
+        # 检查API密钥是否存在
+        if api.lower() == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            print(f"\n错误: 未设置OPENAI_API_KEY环境变量，无法使用OpenAI API")
+            print("请在.env文件中添加OPENAI_API_KEY=your_key或者切换到DeepSeek API")
+            return False
+        elif api.lower() == "deepseek" and not os.environ.get("DEEPSEEK_API_KEY"):
+            print(f"\n错误: 未设置DEEPSEEK_API_KEY环境变量，无法使用DeepSeek API")
+            print("请在.env文件中添加DEEPSEEK_API_KEY=your_key或者切换到OpenAI API")
+            return False
+
+        while attempt < max_attempts and not product_success:
+            attempt += 1
+            try:
+                print(f"\n尝试 {attempt}/{max_attempts}: 正在分析产品 {rank}...")
+                result = subprocess.run(product_cmd, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    print(f"分析产品 {rank} 完成!")
+                    product_success = True
+                else:
+                    print(f"错误: 分析产品 {rank} 失败 (返回码: {result.returncode})")
+                    print(f"错误输出: {result.stderr}")
+
+                    if attempt < max_attempts:
+                        wait_time = 5 * attempt  # 每次重试等待时间增加
+                        print(f"将在 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+            except Exception as e:
+                print(f"错误: 执行分析时出错: {str(e)}")
+
+                if attempt < max_attempts:
+                    wait_time = 5 * attempt
+                    print(f"将在 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+
+        if not product_success:
+            success = False
+
+    # 如果成功并需要更新Excel，则将MD内容插入到Excel表格中
+    if success and update_excel:
+        try:
+            # 获取所有分析结果
+            markdown_dir = output_dir  # 输出目录已经包含了language
+            if not os.path.exists(markdown_dir):
+                print(f"警告: 找不到Markdown文件目录: {markdown_dir}")
+                return success
+
+            # 获取所有分析结果文件
+            md_files = glob.glob(os.path.join(markdown_dir, "*.md"))
+            if not md_files:
+                print("警告: 找不到任何Markdown文件")
+                return success
+
+            print(f"\n找到 {len(md_files)} 个分析结果文件")
+
+            # 读取原始数据
+            try:
+                # 读取原始数据文件
+                tools = pd.read_excel(input_file).to_dict('records')
+                print(f"\n已加载原始数据: {len(tools)} 条记录")
+            except Exception as e:
+                print(f"错误: 无法读取原始数据文件: {str(e)}")
+                return success
+
+            # 准备分析结果
+            analysis_results = []
+            for md_file in md_files:
+                # 从文件名提取排名
+                file_name = os.path.basename(md_file)
+                rank_match = re.match(r'^(\d+)-', file_name)
+                if not rank_match:
+                    continue
+
+                rank = int(rank_match.group(1))
+
+                # 从原始数据中找到对应的产品
+                product = None
+                for p in tools:
+                    p_rank = p.get("Rank") or p.get("排名")
+                    try:
+                        p_rank = int(p_rank)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if p_rank == rank:
+                        product = p
+                        break
+
+                if not product:
+                    continue
+
+                # 添加到分析结果列表
+                analysis_results.append({
+                    "product": product,
+                    "markdown_path": md_file
+                })
+
+            if not analysis_results:
+                print("警告: 没有找到有效的分析结果")
+                return success
+
+            # 更新Excel文件
+            from toolify_utils import update_excel_with_analysis
+            updated_file = update_excel_with_analysis(
+                input_file,  # 使用输入文件作为要更新的Excel文件
+                analysis_results,
+                markdown_dir=markdown_dir
+            )
+
+            if updated_file:
+                print(f"\n成功更新Excel文件: {updated_file}")
+            else:
+                print("警告: 更新Excel文件失败")
+        except Exception as e:
+            print(f"错误: 更新Excel文件时出错: {str(e)}")
+            traceback.print_exc()
+
+    return success
+
+# 分析指定排名范围的产品函数
 def analyze_specific_ranks(rank_range, language="cn", date_str=None, api="deepseek", use_gpu=False, update_excel=False, retry_count=3):
     """
     分析指定排名范围的产品
@@ -437,7 +683,7 @@ def analyze_specific_ranks(rank_range, language="cn", date_str=None, api="deepse
     count = end_rank - start_rank + 1
 
     # 设置输出目录
-    output_dir = os.path.join("output", f"toolify_analysis_{date_str}", language)
+    output_dir = os.path.join("output", f"toolify_analysis_{date_str}", language, "markdown_files")
 
     # 构建命令
     cmd = [
@@ -465,6 +711,16 @@ def analyze_specific_ranks(rank_range, language="cn", date_str=None, api="deepse
     success = False
     attempt = 0
     max_attempts = max(1, retry_count + 1)  # 至少尝试一次
+
+    # 检查API密钥是否存在
+    if api.lower() == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        print(f"\n错误: 未设置OPENAI_API_KEY环境变量，无法使用OpenAI API")
+        print("请在.env文件中添加OPENAI_API_KEY=your_key或者切换到DeepSeek API")
+        return False
+    elif api.lower() == "deepseek" and not os.environ.get("DEEPSEEK_API_KEY"):
+        print(f"\n错误: 未设置DEEPSEEK_API_KEY环境变量，无法使用DeepSeek API")
+        print("请在.env文件中添加DEEPSEEK_API_KEY=your_key或者切换到OpenAI API")
+        return False
 
     while attempt < max_attempts and not success:
         attempt += 1
@@ -495,7 +751,7 @@ def analyze_specific_ranks(rank_range, language="cn", date_str=None, api="deepse
     if success and update_excel:
         try:
             # 获取所有分析结果
-            markdown_dir = os.path.join(output_dir, "markdown_files")
+            markdown_dir = output_dir  # 输出目录已经包含了language
             if not os.path.exists(markdown_dir):
                 print(f"警告: 找不到Markdown文件目录: {markdown_dir}")
                 return success
@@ -573,6 +829,117 @@ def analyze_specific_ranks(rank_range, language="cn", date_str=None, api="deepse
     return success
 
 
+def markdown_to_plaintext(md_text):
+    """
+    将Markdown文本转换为纯文本
+
+    Args:
+        md_text (str): Markdown文本
+
+    Returns:
+        str: 转换后的纯文本
+    """
+    # 移除代码块
+    md_text = re.sub(r'```[\s\S]*?```', '', md_text)
+
+    # 移除图片
+    md_text = re.sub(r'!\[.*?\]\(.*?\)', '', md_text)
+
+    # 移除链接，保留链接文本
+    md_text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', md_text)
+
+    # 移除标题符号
+    md_text = re.sub(r'^#{1,6}\s+', '', md_text, flags=re.MULTILINE)
+
+    # 移除粗体和斜体
+    md_text = re.sub(r'\*\*(.*?)\*\*', r'\1', md_text)
+    md_text = re.sub(r'__(.*?)__', r'\1', md_text)
+    md_text = re.sub(r'\*(.*?)\*', r'\1', md_text)
+    md_text = re.sub(r'_(.*?)_', r'\1', md_text)
+
+    # 移除引用符号
+    md_text = re.sub(r'^>\s+', '', md_text, flags=re.MULTILINE)
+
+    # 移除水平线
+    md_text = re.sub(r'^-{3,}$', '', md_text, flags=re.MULTILINE)
+    md_text = re.sub(r'^\*{3,}$', '', md_text, flags=re.MULTILINE)
+
+    # 移除列表符号
+    md_text = re.sub(r'^\s*[\*\-\+]\s+', '• ', md_text, flags=re.MULTILINE)
+    md_text = re.sub(r'^\s*\d+\.\s+', '• ', md_text, flags=re.MULTILINE)
+
+    # 移除多余的空行
+    md_text = re.sub(r'\n{3,}', '\n\n', md_text)
+
+    return md_text.strip()
+
+
+def format_excel_with_beauty(wb, sheet, column_name="完整分析"):
+    """
+    美化Excel表格
+
+    Args:
+        wb: openpyxl工作簿对象
+        sheet: openpyxl工作表对象
+        column_name (str): 要格式化的列名
+
+    Returns:
+        None
+    """
+    # 定义样式
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    header_font = Font(name="微软雅黑", size=11, bold=True, color="FFFFFF")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # 定义边框样式
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # 设置列宽
+    for col in range(1, sheet.max_column + 1):
+        column_letter = get_column_letter(col)
+        sheet.column_dimensions[column_letter].width = 15
+
+    # 查找分析结果列
+    analysis_col = None
+    for col in range(1, sheet.max_column + 1):
+        if sheet.cell(row=1, column=col).value == column_name:
+            analysis_col = col
+            break
+
+    if analysis_col:
+        # 设置分析结果列的宽度
+        column_letter = get_column_letter(analysis_col)
+        sheet.column_dimensions[column_letter].width = 80
+
+    # 设置行高
+    for row in range(2, sheet.max_row + 1):
+        sheet.row_dimensions[row].height = 300
+
+    # 设置标题行样式
+    for col in range(1, sheet.max_column + 1):
+        cell = sheet.cell(row=1, column=col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    # 设置数据行样式
+    for row in range(2, sheet.max_row + 1):
+        for col in range(1, sheet.max_column + 1):
+            cell = sheet.cell(row=row, column=col)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = thin_border
+
+            # 为分析结果列设置特殊样式
+            if col == analysis_col:
+                cell.font = Font(name="微软雅黑", size=10)
+
+
 def insert_md_to_excel(excel_file=None, markdown_dir=None, date_str=None, language="cn"):
     """
     将Markdown文件内容插入到Excel表格中
@@ -589,137 +956,197 @@ def insert_md_to_excel(excel_file=None, markdown_dir=None, date_str=None, langua
     if date_str is None:
         date_str = datetime.now().strftime("%Y%m%d")
 
-    # 如果没有提供Excel文件路径，尝试查找
-    if excel_file is None:
-        data_dir = os.path.join("output", "toolify_data")
-        excel_file = os.path.join(data_dir, f"Toolify_Top_AI_Revenue_Rankings_{language.upper()}_{date_str}.xlsx")
+    print(f"\n🔍 开始将Markdown文件插入到Excel表格中...")
 
-        if not os.path.exists(excel_file):
-            # 尝试查找其他可能的文件名
-            alt_excel_file = os.path.join(data_dir, f"Toolify_AI_Revenue_{language.upper()}_{date_str}.xlsx")
-            if os.path.exists(alt_excel_file):
-                excel_file = alt_excel_file
-            else:
-                # 尝试查找任何匹配的Excel文件
-                excel_files = glob.glob(os.path.join(data_dir, f"*{language.upper()}*{date_str}*.xlsx"))
-                if excel_files:
-                    excel_file = excel_files[0]
+    # 使用try-except块包装整个函数
+    try:
+        # 如果没有提供Excel文件路径，尝试查找最新的文件
+        if not excel_file:
+            data_dir = os.path.join("output", "toolify_data")
+            excel_pattern = f"Toolify_AI_Revenue_{language.upper()}_{date_str}.xlsx"
+            excel_files = glob.glob(os.path.join(data_dir, excel_pattern))
+
+            if not excel_files:
+                print(f"⚠️ 在{data_dir}目录中未找到匹配的Excel文件: {excel_pattern}")
+                return False
+
+            excel_file = excel_files[0]
+            print(f"找到Excel文件: {excel_file}")
+
+        # 如果未提供Markdown目录，尝试查找
+        if not markdown_dir:
+            md_base_dir = os.path.join("output", f"toolify_analysis_{date_str}")
+            possible_md_dirs = [
+                # 标准目录结构
+                os.path.join(md_base_dir, language, "markdown_files"),
+                # 兼容旧的分析目录
+                os.path.join("output", "toolify_data", f"analysis_{date_str}", language, "markdown_files")
+            ]
+
+            print(f"正在查找Markdown目录...")
+            for dir_path in possible_md_dirs:
+                print(f"  检查目录: {dir_path}")
+                if os.path.exists(dir_path) and os.path.isdir(dir_path):
+                    # 检查目录中是否有.md文件
+                    md_files = glob.glob(os.path.join(dir_path, "*.md"))
+                    if md_files:
+                        markdown_dir = dir_path
+                        print(f"  找到Markdown目录: {markdown_dir} (包含 {len(md_files)} 个.md文件)")
+                        break
+                    else:
+                        print(f"  目录存在但没有.md文件: {dir_path}")
                 else:
-                    print(f"错误: 找不到Excel文件，请手动指定 --excel-file 参数")
-                    return False
+                    print(f"  目录不存在: {dir_path}")
 
-    # 如果没有提供Markdown目录，尝试查找
-    if markdown_dir is None:
-        markdown_dir = os.path.join("output", f"toolify_analysis_{date_str}", language, "markdown_files")
-        if not os.path.exists(markdown_dir):
-            print(f"错误: 找不到Markdown文件目录: {markdown_dir}")
-            print("请手动指定 --markdown-dir 参数")
+            if not markdown_dir:
+                print(f"⚠️ 未找到Markdown目录，尝试了以下路径:")
+                for dir_path in possible_md_dirs:
+                    print(f"  - {dir_path}")
+                return False
+
+        # 读取Excel文件
+        df = pd.read_excel(excel_file)
+
+        # 确保完整分析列存在
+        if "完整分析" not in df.columns:
+            df["完整分析"] = ""
+            print(f"已添加完整分析列")
+
+        # 查找Markdown文件
+        md_files = glob.glob(os.path.join(markdown_dir, "*.md"))
+        if not md_files:
+            print(f"⚠️ 在{markdown_dir}目录中未找到Markdown文件")
             return False
 
-    # 检查文件和目录是否存在
-    if not os.path.exists(excel_file):
-        print(f"错误: Excel文件不存在: {excel_file}")
-        return False
+        # 为每个产品查找对应的Markdown文件
+        for index, row in df.iterrows():
+            # 获取产品ID（索引+1）
+            product_id = index + 1
 
-    if not os.path.exists(markdown_dir):
-        print(f"错误: Markdown目录不存在: {markdown_dir}")
-        return False
+            # 查找对应的Markdown文件
+            md_file = None
+            for file in md_files:
+                file_name = os.path.basename(file)
+                # 尝试不同的模式匹配
+                if f"_{product_id}_" in file_name:
+                    md_file = file
+                    break
+                # 尝试匹配排名-开头的文件
+                rank_match = re.match(r'^(\d+)-', file_name)
+                if rank_match and int(rank_match.group(1)) == product_id:
+                    md_file = file
+                    break
 
-    # 读取Excel文件
-    try:
-        print(f"正在读取Excel文件: {excel_file}")
-        tools = pd.read_excel(excel_file).to_dict('records')
-        print(f"已加载 {len(tools)} 条产品数据")
-    except Exception as e:
-        print(f"错误: 无法读取Excel文件: {str(e)}")
-        traceback.print_exc()
-        return False
+            if md_file:
+                # 读取Markdown文件内容
+                try:
+                    with open(md_file, "r", encoding="utf-8") as f:
+                        md_content = f.read()
+                except UnicodeDecodeError:
+                    # 尝试使用其他编码
+                    try:
+                        with open(md_file, "r", encoding="gbk") as f:
+                            md_content = f.read()
+                    except UnicodeDecodeError:
+                        print(f"\u2757 无法读取文件: {md_file}")
+                        continue
 
-    # 获取所有Markdown文件
-    md_files = glob.glob(os.path.join(markdown_dir, "*.md"))
-    if not md_files:
-        print(f"错误: 在 {markdown_dir} 中找不到任何Markdown文件")
-        return False
+                # 将Markdown内容转换为纯文本
+                plain_text = markdown_to_plaintext(md_content)
 
-    print(f"找到 {len(md_files)} 个Markdown文件")
+                # 将Markdown内容添加到DataFrame中
+                # 确保完整分析列存在
+                if "完整分析" not in df.columns:
+                    df["完整分析"] = ""
 
-    # 准备分析结果
-    analysis_results = []
-    for md_file in md_files:
-        # 从文件名提取排名
-        file_name = os.path.basename(md_file)
-        rank_match = re.match(r'^(\d+)-', file_name)
-        if not rank_match:
-            print(f"警告: 无法从文件名提取排名: {file_name}")
-            continue
+                # 处理可能的乱码问题
+                try:
+                    # 尝试直接使用纯文本
+                    df.at[index, "完整分析"] = plain_text
+                    print(f"✅ 已插入产品ID {product_id} 的分析结果")
+                except Exception as e:
+                    # 如果出错，尝试使用原始Markdown内容
+                    print(f"❗ 插入纯文本时出错: {str(e)}")
+                    try:
+                        df.at[index, "完整分析"] = md_content
+                        print(f"✅ 已插入产品ID {product_id} 的原始Markdown内容")
+                    except Exception as e2:
+                        print(f"❗ 插入原始Markdown内容时出错: {str(e2)}")
 
-        rank = int(rank_match.group(1))
-        print(f"处理排名 {rank} 的产品: {file_name}")
+        # 保存更新后的Excel文件
+        # 创建输出目录
+        output_dir = os.path.join("output", f"toolify_analysis_{date_str}")
+        os.makedirs(output_dir, exist_ok=True)
 
-        # 从原始数据中找到对应的产品
-        product = None
-        for p in tools:
-            p_rank = p.get("Rank") or p.get("排名")
-            try:
-                p_rank = int(p_rank)
-            except (ValueError, TypeError):
-                continue
+        # 生成输出文件名 - 使用固定命名格式而不是时间戳
+        file_name = os.path.basename(excel_file)
+        standard_output_file = os.path.join(output_dir, file_name.replace(".xlsx", "_analyzed.xlsx"))
 
-            if p_rank == rank:
-                product = p
-                break
-
-        if not product:
-            print(f"警告: 找不到排名为 {rank} 的产品数据")
-            continue
-
-        # 从文件内容中检测分析工具
-        api_name = "DeepSeek AI"  # 默认值
+        # 尝试保存文件
         try:
-            with open(md_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                # 检测是否包含OpenAI或GPT
-                if "OpenAI" in content or "GPT" in content:
-                    api_name = "OpenAI GPT-4"
-                # 检测是否包含DeepSeek
-                elif "DeepSeek" in content:
-                    api_name = "DeepSeek AI"
-                print(f"  检测到分析工具: {api_name}")
-        except Exception as e:
-            print(f"  警告: 无法读取文件内容: {str(e)}")
+            df.to_excel(standard_output_file, index=False)
+            output_file = standard_output_file
+        except PermissionError:
+            # 如果出现权限错误，尝试使用带时间戳的文件名
+            timestamp = datetime.now().strftime("%H%M%S")
+            backup_output_file = os.path.join(output_dir, file_name.replace(".xlsx", f"_analyzed_backup.xlsx"))
+            print(f"标准文件被占用，尝试使用备用文件名: {backup_output_file}")
+            try:
+                df.to_excel(backup_output_file, index=False)
+                output_file = backup_output_file
+            except PermissionError:
+                # 如果备用文件也被占用，使用带时间戳的文件名
+                timestamp_output_file = os.path.join(output_dir, f"Toolify_AI_Revenue_{language.upper()}_{date_str}_analyzed_{timestamp}.xlsx")
+                print(f"备用文件也被占用，使用时间戳文件名: {timestamp_output_file}")
+                df.to_excel(timestamp_output_file, index=False)
+                output_file = timestamp_output_file
 
-        # 添加到分析结果列表
-        analysis_results.append({
-            "product": product,
-            "markdown_path": md_file,
-            "api_name": api_name  # 添加分析工具信息
-        })
+        # 使用openpyxl美化Excel
+        from openpyxl import load_workbook
+        wb = load_workbook(output_file)
+        sheet = wb.active
+        format_excel_with_beauty(wb, sheet)
+        wb.save(output_file)
 
-    if not analysis_results:
-        print("错误: 没有找到有效的分析结果")
-        return False
+        print(f"✅ 已将分析结果保存到 {output_file}")
 
-    print(f"准备更新 {len(analysis_results)} 个产品的分析结果")
+        # 清理旧的Excel文件
+        clean_old_excel_files(output_dir, language, date_str)
 
-    # 更新Excel文件
-    try:
-        from toolify_utils import update_excel_with_analysis
-        updated_file = update_excel_with_analysis(
-            excel_file,
-            analysis_results,
-            markdown_dir=markdown_dir
-        )
-
-        if updated_file:
-            print(f"成功更新Excel文件: {updated_file}")
-            return True
-        else:
-            print("错误: 更新Excel文件失败")
-            return False
+        return True
     except Exception as e:
-        print(f"错误: 更新Excel文件时出错: {str(e)}")
+        print(f"❌ 插入Markdown文件时出错: {str(e)}")
         traceback.print_exc()
         return False
+
+
+def clean_old_excel_files(output_dir, language, date_str):
+    """
+    清理旧的Excel文件，只保留最新生成的标准文件
+    """
+    # 查找目录中的所有Excel文件
+    pattern = f"Toolify_AI_Revenue_{language.upper()}_{date_str}_*.xlsx"
+    excel_files = glob.glob(os.path.join(output_dir, pattern))
+
+    # 最新生成的标准文件的名称
+    standard_file = os.path.join(output_dir, f"Toolify_AI_Revenue_{language.upper()}_{date_str}_analyzed.xlsx")
+
+    # 过滤要删除的文件
+    files_to_delete = []
+    for file in excel_files:
+        # 如果是最新生成的标准文件，则跳过
+        if file == standard_file:
+            continue
+        # 其他所有文件都添加到要删除的列表中
+        files_to_delete.append(file)
+
+    # 删除文件
+    for file in files_to_delete:
+        try:
+            os.remove(file)
+            print(f"✅ 已删除旧文件: {file}")
+        except Exception as e:
+            print(f"⚠️ 删除文件 {file} 时出错: {str(e)}")
 
 
 def main():
@@ -757,6 +1184,9 @@ def main():
     parser.add_argument('--rank-range', dest='rank_range',
                         type=str, default=None,
                         help='分析指定排名范围的产品，如"1-5"')
+    parser.add_argument('--product-ids', dest='product_ids',
+                        type=str, default=None,
+                        help='分析指定产品ID的产品，如"1,2,3"')
     parser.add_argument('--api', dest='api',
                         choices=['deepseek', 'openai'],
                         default='deepseek',
@@ -779,6 +1209,9 @@ def main():
     parser.add_argument('--no-scraping', dest='no_scraping',
                         action='store_true',
                         help='不使用爬虫，直接使用本地Excel文件进行分析')
+    parser.add_argument('--no-analysis', dest='do_analysis',
+                        action='store_false',
+                        help='跳过数据分析步骤')
 
     # 解析参数
     args = parser.parse_args()
@@ -899,9 +1332,9 @@ def main():
                 else:
                     print("⚠️ 产品分析未完全成功")
 
-        # 步骤4: 分析指定排名范围的产品（可选）
-        if args.rank_range:
-            print("\n🔍 步骤4: 分析指定排名范围的产品")
+        # 步骤4: 分析指定排名范围或产品ID的产品（可选）
+        if args.rank_range or args.product_ids:
+            print("\n🔍 步骤4: 分析指定产品")
 
             # 处理language参数
             if args.language == 'both':
@@ -986,21 +1419,40 @@ def main():
                 else:
                     print(f"✅ 成功爬取 {len(tools)} 个产品数据")
 
-                # 分析指定排名范围的产品
-                success = analyze_specific_ranks(
-                    args.rank_range,
-                    lang,
-                    date_str,
-                    api=args.api,
-                    use_gpu=args.use_gpu,
-                    update_excel=args.update_excel,
-                    retry_count=args.retry_count
-                )
+                # 分析指定排名范围或产品ID的产品
+                if args.rank_range:
+                    print(f"\n🔍 开始分析指定排名范围的产品: {args.rank_range}")
+                    success = analyze_specific_ranks(
+                        args.rank_range,
+                        lang,
+                        date_str,
+                        api=args.api,
+                        use_gpu=args.use_gpu,
+                        update_excel=args.update_excel,
+                        retry_count=args.retry_count
+                    )
 
-                if success:
-                    print("✅ 指定排名范围的产品分析完成")
-                else:
-                    print("⚠️ 指定排名范围的产品分析未完成或未返回结果")
+                    if success:
+                        print("✅ 指定排名范围的产品分析完成")
+                    else:
+                        print("⚠️ 指定排名范围的产品分析未完成或未返回结果")
+                elif args.product_ids:
+                    print(f"\n🔍 开始分析指定产品ID的产品: {args.product_ids}")
+                    success = analyze_specific_products(
+                        args.product_ids,
+                        lang,
+                        date_str,
+                        api=args.api,
+                        use_gpu=args.use_gpu,
+                        update_excel=args.update_excel,
+                        retry_count=args.retry_count,
+                        excel_file=args.excel_file
+                    )
+
+                    if success:
+                        print("✅ 指定产品ID的产品分析完成")
+                    else:
+                        print("⚠️ 指定产品ID的产品分析未完成或未返回结果")
 
         print("\n🎉 所有任务完成!")
 

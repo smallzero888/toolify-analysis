@@ -325,13 +325,12 @@ def analyze_product_with_openai(product, api_key, language="cn"):
 
     # 从产品数据中提取信息
     name = product.get("Tool Name") or product.get("工具名称", "未知")
-    rank = product.get("Rank") or product.get("Ranking") or product.get("排名", "未知")
+    rank = product.get("Rank") or product.get("排名", "未知")
     revenue = product.get("Revenue") or product.get("收入", "未知")
 
-    # 获取网站链接
-    website = product.get("Website") or product.get("D") or product.get("网站", "未知")
-    # 获取工具链接
-    tool_link = product.get("Tool Link") or product.get("C") or product.get("工具链接", "未知")
+    # 使用C列作为产品链接，D列作为产品网址
+    tool_link = product.get("C") or product.get("工具链接", "未知")
+    website = product.get("D") or product.get("网站", "未知")
 
     monthly_visits = product.get("Monthly Visits") or product.get("月访问量", "未知")
     company = product.get("Company") or product.get("公司", "未知")
@@ -486,13 +485,12 @@ def analyze_product_with_deepseek(product, api_key, language="cn"):
 
     # 从产品数据中提取信息
     name = product.get("Tool Name") or product.get("工具名称", "未知")
-    rank = product.get("Rank") or product.get("Ranking") or product.get("排名", "未知")
+    rank = product.get("Rank") or product.get("排名", "未知")
     revenue = product.get("Revenue") or product.get("收入", "未知")
 
-    # 获取网站链接
-    website = product.get("Website") or product.get("D") or product.get("网站", "未知")
-    # 获取工具链接
-    tool_link = product.get("Tool Link") or product.get("C") or product.get("工具链接", "未知")
+    # 使用C列作为产品链接，D列作为产品网址
+    tool_link = product.get("C") or product.get("工具链接", "未知")
+    website = product.get("D") or product.get("网站", "未知")
 
     monthly_visits = product.get("Monthly Visits") or product.get("月访问量", "未知")
     company = product.get("Company") or product.get("公司", "未知")
@@ -663,7 +661,7 @@ def analyze_product(rank, api="deepseek", language="cn", date_str=None, base_dir
     # 查找对应排名的产品
     product = None
     for p in products:
-        p_rank = p.get("Rank") or p.get("Ranking") or p.get("排名")
+        p_rank = p.get("Rank") or p.get("排名")
         try:
             p_rank = int(p_rank)
         except (ValueError, TypeError):
